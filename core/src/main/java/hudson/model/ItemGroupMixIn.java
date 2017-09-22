@@ -131,7 +131,7 @@ public abstract class ItemGroupMixIn {
     }
 
     /**
-     * {@link Item} -> name function.
+     * {@link Item} → name function.
      */
     public static final Function1<String,Item> KEYED_BY_NAME = new Function1<String, Item>() {
         public String call(Item item) {
@@ -317,11 +317,7 @@ public abstract class ItemGroupMixIn {
         Items.verifyItemDoesNotAlreadyExist(parent, name, null);
 
         TopLevelItem item = type.newInstance(parent, name);
-        try {
-            callOnCreatedFromScratch(item);
-        } catch (AbstractMethodError e) {
-            // ignore this error. Must be older plugin that doesn't have this method
-        }
+        item.onCreatedFromScratch();
         item.save();
         add(item);
         Jenkins.getInstance().rebuildDependencyGraphAsync();
@@ -332,10 +328,4 @@ public abstract class ItemGroupMixIn {
         return item;
     }
 
-    /**
-     * Pointless wrapper to avoid HotSpot problem. See JENKINS-5756
-     */
-    private void callOnCreatedFromScratch(TopLevelItem item) {
-        item.onCreatedFromScratch();
-    }
 }

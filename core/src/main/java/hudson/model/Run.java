@@ -42,6 +42,7 @@ import hudson.console.ConsoleNote;
 import hudson.console.ModelHyperlinkNote;
 import hudson.console.PlainTextConsoleOutputStream;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.StandardOpenOption;
 import jenkins.util.SystemProperties;
 import hudson.Util;
@@ -50,7 +51,6 @@ import hudson.cli.declarative.CLIMethod;
 import hudson.model.Descriptor.FormException;
 import hudson.model.listeners.RunListener;
 import hudson.model.listeners.SaveableListener;
-import hudson.model.queue.Executables;
 import hudson.model.queue.SubTask;
 import hudson.search.SearchIndexBuilder;
 import hudson.security.ACL;
@@ -436,7 +436,7 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
 
     /**
      * Set the queue item ID.
-     * <p/>
+     * <p>
      * Mapped from the {@link Queue.Item#getId()}.
      * @param queueId The queue item ID.
      */
@@ -523,7 +523,7 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
      * and because of that this might not be necessarily in sync with the return value of {@link #isBuilding()} &mdash;
      * an executor holds on to {@link Run} some more time even after the build is finished (for example to
      * perform {@linkplain Run.State#POST_PRODUCTION post-production processing}.)
-     * @see Executables#getExecutor
+     * @see Executor#of
      */
     @Exported 
     public @CheckForNull Executor getExecutor() {
@@ -773,6 +773,9 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
 
     @Override
     public String toString() {
+        if (project == null) {
+            return "<broken data JENKINS-45892>";
+        }
         return project.getFullName() + " #" + number;
     }
 
@@ -929,7 +932,7 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
     }
 
     /**
-     * Returns the last 'numberOfBuilds' builds with a build result >= 'threshold'.
+     * Returns the last {@code numberOfBuilds} builds with a build result ≥ {@code threshold}.
      * 
      * @param numberOfBuilds the desired number of builds
      * @param threshold the build result threshold
@@ -1012,11 +1015,6 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
         return id != null ? id : Integer.toString(number);
     }
     
-    @Override
-    public @CheckForNull Descriptor getDescriptorByName(String className) {
-        return Jenkins.getInstance().getDescriptorByName(className);
-    }
-
     /**
      * Get the root directory of this {@link Run} on the master.
      * Files related to this {@link Run} should be stored below this directory.
@@ -1367,12 +1365,16 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
     	
     	if (logFile.exists() ) {
     	    // Checking if a ".gz" file was return
-    	    InputStream fis = Files.newInputStream(logFile.toPath());
-    	    if (logFile.getName().endsWith(".gz")) {
-    	        return new GZIPInputStream(fis);
-    	    } else {
-    	        return fis;
-    	    }
+            try {
+                InputStream fis = Files.newInputStream(logFile.toPath());
+                if (logFile.getName().endsWith(".gz")) {
+                    return new GZIPInputStream(fis);
+                } else {
+                    return fis;
+                }
+            } catch (InvalidPathException e) {
+                throw new IOException(e);
+            }
     	}
     	
         String message = "No such file: " + logFile;
@@ -1407,7 +1409,7 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
      *
      * If someone is still writing to the log, this method will not return until the whole log
      * file gets written out.
-     * <p/>
+     * <p>
      * The method does not close the {@link OutputStream}.
      */
     public void writeWholeLogTo(@Nonnull OutputStream out) throws IOException, InterruptedException {
@@ -1447,16 +1449,6 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
 
     public @Nonnull Api getApi() {
         return new Api(this);
-    }
-
-    @Override
-    public void checkPermission(@Nonnull Permission p) {
-        getACL().checkPermission(p);
-    }
-
-    @Override
-    public boolean hasPermission(@Nonnull Permission p) {
-        return getACL().hasPermission(p);
     }
 
     @Override
@@ -1682,7 +1674,7 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
 
     /**
      * @deprecated as of 1.467
-     *      Use {@link #execute(RunExecution)}
+     *      Use {@link #execute(hudson.model.Run.RunExecution)}
      */
     @Deprecated
     protected final void run(@Nonnull Runner job) {
@@ -1693,6 +1685,7 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
         if(result!=null)
             return;     // already built.
 
+        OutputStream logger = null;
         StreamBuildListener listener=null;
 
         runner = job;
@@ -1711,7 +1704,8 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
                         charset = computer.getDefaultCharset();
                         this.charset = charset.name();
                     }
-                    listener = createBuildListener(job, listener, charset);
+                    logger = createLogger();
+                    listener = createBuildListener(job, logger, charset);
                     listener.started(getCauses());
 
                     Authentication auth = Jenkins.getAuthentication();
@@ -1793,18 +1787,32 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
             try {
                 getParent().logRotate();
             } catch (Exception e) {
-		LOGGER.log(Level.SEVERE, "Failed to rotate log",e);
-	    }
+                LOGGER.log(Level.SEVERE, "Failed to rotate log",e);
+            }
         } finally {
             onEndBuilding();
+            if (logger != null) {
+                try {
+                    logger.close();
+                } catch (IOException x) {
+                    LOGGER.log(Level.WARNING, "failed to close log for " + Run.this, x);
+                }
+            }
         }
     }
 
-    private StreamBuildListener createBuildListener(@Nonnull RunExecution job, StreamBuildListener listener, Charset charset) throws IOException, InterruptedException {
+    private OutputStream createLogger() throws IOException {
         // don't do buffering so that what's written to the listener
         // gets reflected to the file immediately, which can then be
         // served to the browser immediately
-        OutputStream logger = Files.newOutputStream(getLogFile().toPath(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        try {
+            return Files.newOutputStream(getLogFile().toPath(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        } catch (InvalidPathException e) {
+            throw new IOException(e);
+        }
+    }
+
+    private StreamBuildListener createBuildListener(@Nonnull RunExecution job, OutputStream logger, Charset charset) throws IOException, InterruptedException {
         RunT build = job.getBuild();
 
         // Global log filters
@@ -1820,8 +1828,7 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
             }
         }
 
-        listener = new StreamBuildListener(logger,charset);
-        return listener;
+        return new StreamBuildListener(logger,charset);
     }
 
     /**
@@ -1916,6 +1923,19 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
 
     private @Nonnull XmlFile getDataFile() {
         return new XmlFile(XSTREAM,new File(getRootDir(),"build.xml"));
+    }
+
+    private Object writeReplace() {
+        return XmlFile.replaceIfNotAtTopLevel(this, () -> new Replacer(this));
+    }
+    private static class Replacer {
+        private final String id;
+        Replacer(Run<?, ?> r) {
+            id = r.getExternalizableId();
+        }
+        private Object readResolve() {
+            return fromExternalizableId(id);
+        }
     }
 
     /**
@@ -2118,7 +2138,6 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
      */
     public void doConsoleText(StaplerRequest req, StaplerResponse rsp) throws IOException {
         rsp.setContentType("text/plain;charset=UTF-8");
-        ;
         try (InputStream input = getLogInputStream();
              OutputStream os = rsp.getCompressedOutputStream(req);
              PlainTextConsoleOutputStream out = new PlainTextConsoleOutputStream(os)) {
@@ -2153,6 +2172,7 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
         return true;
     }
 
+    @RequirePOST
     public void doToggleLogKeep( StaplerRequest req, StaplerResponse rsp ) throws IOException, ServletException {
         keepLog(!keepLog);
         rsp.forwardToPreviousPage(req);
@@ -2208,6 +2228,7 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
     /**
      * Accepts the new description.
      */
+    @RequirePOST
     public synchronized void doSubmitDescription( StaplerRequest req, StaplerResponse rsp ) throws IOException, ServletException {
         setDescription(req.getParameter("description"));
         rsp.sendRedirect(".");  // go to the top page
@@ -2265,6 +2286,12 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
         for (EnvironmentContributor ec : EnvironmentContributor.all().reverseView())
             ec.buildEnvironmentFor(this,env,listener);
 
+        if (!(this instanceof AbstractBuild)) {
+            for (EnvironmentContributingAction a : getActions(EnvironmentContributingAction.class)) {
+                a.buildEnvironment(this, env);
+            }
+        } // else for compatibility reasons, handled in override after buildEnvironments
+
         return env;
     }
 
@@ -2307,7 +2334,10 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
         } catch (NumberFormatException x) {
             throw new IllegalArgumentException(x);
         }
-        Jenkins j = Jenkins.getInstance();
+        Jenkins j = Jenkins.getInstanceOrNull();
+        if (j == null) {
+            return null;
+        }
         Job<?,?> job = j.getItemByFullName(jobName, Job.class);
         if (job == null) {
             return null;
@@ -2410,7 +2440,7 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
 
     private static class DefaultFeedAdapter implements FeedAdapter<Run> {
         public String getEntryTitle(Run entry) {
-            return entry+" ("+entry.getBuildStatusSummary().message+")";
+            return entry.getFullDisplayName()+" ("+entry.getBuildStatusSummary().message+")";
         }
 
         public String getEntryUrl(Run entry) {

@@ -26,6 +26,7 @@ package hudson;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import jenkins.util.SystemProperties;
 import hudson.util.DualOutputStream;
 import hudson.util.EncodingStream;
@@ -52,6 +53,8 @@ import java.nio.charset.Charset;
  * @author Kohsuke Kawaguchi
  */
 public class Main {
+
+    /** @see #remotePost */
     public static void main(String[] args) {
         try {
             System.exit(run(args));
@@ -61,6 +64,7 @@ public class Main {
         }
     }
 
+    /** @see #remotePost */
     public static int run(String[] args) throws Exception {
         String home = getHudsonHome();
         if (home==null) {
@@ -82,7 +86,8 @@ public class Main {
     }
 
     /**
-     * Run command and place the result to a remote Hudson installation
+     * Run command and send result to {@code ExternalJob} in the {@code external-monitor-job} plugin.
+     * Obsoleted by {@code SetExternalBuildResultCommand} but kept here for compatibility.
      */
     public static int remotePost(String[] args) throws Exception {
         String projectName = args[0];
@@ -155,6 +160,8 @@ public class Main {
                 ret = proc.join();
 
                 w.write("</log><result>"+ret+"</result><duration>"+(System.currentTimeMillis()-start)+"</duration></run>");
+            } catch (InvalidPathException e) {
+                throw new IOException(e);
             }
 
             URL location = new URL(jobURL, "postBuildResult");
@@ -173,6 +180,8 @@ public class Main {
                     // send the data
                     try (InputStream in = Files.newInputStream(tmpFile.toPath())) {
                         org.apache.commons.io.IOUtils.copy(in, con.getOutputStream());
+                    } catch (InvalidPathException e) {
+                        throw new IOException(e);
                     }
 
                     if(con.getResponseCode()!=200) {

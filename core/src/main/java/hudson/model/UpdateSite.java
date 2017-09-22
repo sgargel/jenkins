@@ -36,7 +36,7 @@ import hudson.util.FormValidation;
 import hudson.util.FormValidation.Kind;
 import hudson.util.HttpResponses;
 import hudson.util.TextFile;
-import static hudson.util.TimeUnit2.*;
+import static java.util.concurrent.TimeUnit.*;
 import hudson.util.VersionNumber;
 import java.io.File;
 import java.io.IOException;
@@ -193,6 +193,7 @@ public class UpdateSite {
     /**
      * This is the endpoint that receives the update center data file from the browser.
      */
+    @RequirePOST
     public FormValidation doPostBack(StaplerRequest req) throws IOException, GeneralSecurityException {
         DownloadSettings.checkPostBackAccess();
         return updateData(IOUtils.toString(req.getInputStream(),"UTF-8"), true);
@@ -484,18 +485,6 @@ public class UpdateSite {
      */
     @Deprecated
     public String getDownloadUrl() {
-        /*
-            HACKISH:
-
-            Loading scripts in HTTP from HTTPS pages cause browsers to issue a warning dialog.
-            The elegant way to solve the problem is to always load update center from HTTPS,
-            but our backend mirroring scheme isn't ready for that. So this hack serves regular
-            traffic in HTTP server, and only use HTTPS update center for Jenkins in HTTPS.
-
-            We'll monitor the traffic to see if we can sustain this added traffic.
-         */
-        if (url.equals("http://updates.jenkins-ci.org/update-center.json") && Jenkins.getInstance().isRootUrlSecure())
-            return "https"+url.substring(4);
         return url;
     }
 

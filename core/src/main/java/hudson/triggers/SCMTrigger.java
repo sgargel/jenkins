@@ -45,7 +45,7 @@ import hudson.util.FormValidation;
 import hudson.util.NamingThreadFactory;
 import hudson.util.SequentialExecutionQueue;
 import hudson.util.StreamTaskListener;
-import hudson.util.TimeUnit2;
+import java.util.concurrent.TimeUnit;
 import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -93,7 +93,7 @@ import static java.util.logging.Level.WARNING;
  * You can add UI elements under the SCM section by creating a
  * config.jelly or config.groovy in the resources area for
  * your class that inherits from SCMTrigger and has the 
- * @{@link hudson.model.Extension} annotation. The UI should 
+ * {@link Extension} annotation. The UI should 
  * be wrapped in an f:section element to denote it.
  *
  * @author Kohsuke Kawaguchi
@@ -748,5 +748,5 @@ public class SCMTrigger extends Trigger<Item> {
     /**
      * How long is too long for a polling activity to be in the queue?
      */
-    public static long STARVATION_THRESHOLD = SystemProperties.getLong(SCMTrigger.class.getName()+".starvationThreshold", TimeUnit2.HOURS.toMillis(1));
+    public static long STARVATION_THRESHOLD = SystemProperties.getLong(SCMTrigger.class.getName()+".starvationThreshold", TimeUnit.HOURS.toMillis(1));
 }

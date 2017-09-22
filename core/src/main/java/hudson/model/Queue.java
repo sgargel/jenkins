@@ -64,17 +64,17 @@ import hudson.model.queue.WorkUnitContext;
 import hudson.security.ACL;
 import hudson.security.AccessControlled;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import jenkins.security.QueueItemAuthenticatorProvider;
 import jenkins.util.Timer;
 import hudson.triggers.SafeTimerTask;
-import hudson.util.TimeUnit2;
+import java.util.concurrent.TimeUnit;
 import hudson.util.XStream2;
 import hudson.util.ConsistentHash;
 import hudson.util.ConsistentHash.Hash;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.lang.ref.WeakReference;
@@ -141,7 +141,7 @@ import org.kohsuke.stapler.interceptor.RequirePOST;
  *
  * <p>
  * Items in queue goes through several stages, as depicted below:
- * <pre>
+ * <pre>{@code
  * (enter) --> waitingList --+--> blockedProjects
  *                           |        ^
  *                           |        |
@@ -150,7 +150,7 @@ import org.kohsuke.stapler.interceptor.RequirePOST;
  *                                    ^              |
  *                                    |              |
  *                                    +---(rarely)---+
- * </pre>
+ * }</pre>
  *
  * <p>
  * Note: In the normal case of events pending items only move to left. However they can move back
@@ -384,6 +384,8 @@ public class Queue extends ResourceController implements Saveable {
                         if (j != null)
                             j.scheduleBuild();
                     }
+                } catch (InvalidPathException e) {
+                    throw new IOException(e);
                 }
                 // discard the queue file now that we are done
                 queueFile.delete();
@@ -1014,7 +1016,7 @@ public class Queue extends ResourceController implements Saveable {
     
     /**
      * How many {@link BuildableItem}s are assigned for the given label?
-     * <p/>
+     * <p>
      * The implementation is quite similar to {@link #countBuildableItemsFor(hudson.model.Label)},
      * but it has another behavior for null parameters.
      * @param l Label to be checked. If null, only jobs without assigned labels
@@ -1191,11 +1193,8 @@ public class Queue extends ResourceController implements Saveable {
      * unless that project allows concurrent builds.
      */
     private boolean allowNewBuildableTask(Task t) {
-        try {
-            if (t.isConcurrentBuild())
-                return true;
-        } catch (AbstractMethodError e) {
-            // earlier versions don't have the "isConcurrentBuild" method, so fall back gracefully
+        if (t.isConcurrentBuild()) {
+            return true;
         }
         return !buildables.containsKey(t) && !pendings.containsKey(t);
     }
@@ -1541,7 +1540,7 @@ public class Queue extends ResourceController implements Saveable {
                     continue;
                 }
 
-                String taskDisplayName = p.task.getFullDisplayName();
+                String taskDisplayName = LOGGER.isLoggable(Level.FINEST) ? p.task.getFullDisplayName() : null;
 
                 if (p.task instanceof FlyweightTask) {
                     Runnable r = makeFlyWeightTaskBuildable(new BuildableItem(p));
@@ -1618,7 +1617,7 @@ public class Queue extends ResourceController implements Saveable {
      */
     private @CheckForNull Runnable makeBuildable(final BuildableItem p) {
         if (p.task instanceof FlyweightTask) {
-            String taskDisplayName = p.task.getFullDisplayName();
+            String taskDisplayName = LOGGER.isLoggable(Level.FINEST) ? p.task.getFullDisplayName() : null;
             if (!isBlockedByShutdown(p.task)) {
 
                 Runnable runnable = makeFlyWeightTaskBuildable(p);
@@ -1666,7 +1665,8 @@ public class Queue extends ResourceController implements Saveable {
             hash.addAll(hashSource);
 
             Label lbl = p.getAssignedLabel();
-            for (Node n : hash.list(p.task.getFullDisplayName())) {
+            String fullDisplayName = p.task.getFullDisplayName();
+            for (Node n : hash.list(fullDisplayName)) {
                 final Computer c = n.toComputer();
                 if (c == null || c.isOffline()) {
                     continue;
@@ -1678,7 +1678,7 @@ public class Queue extends ResourceController implements Saveable {
                     continue;
                 }
 
-                LOGGER.log(Level.FINEST, "Creating flyweight task {0} for computer {1}", new Object[]{p.task.getFullDisplayName(), c.getName()});
+                LOGGER.log(Level.FINEST, "Creating flyweight task {0} for computer {1}", new Object[]{fullDisplayName, c.getName()});
                 return new Runnable() {
                     @Override public void run() {
                         c.startFlyWeightTask(new WorkUnitContext(p).createWorkUnit(p.task));
@@ -1798,8 +1798,12 @@ public class Queue extends ResourceController implements Saveable {
          * <p>
          * This can be used to define mutual exclusion that goes beyond
          * {@link #getResourceList()}.
+         * @return by default, null
          */
-        CauseOfBlockage getCauseOfBlockage();
+        @CheckForNull
+        default CauseOfBlockage getCauseOfBlockage() {
+            return null;
+        }
 
         /**
          * Unique name of this task.
@@ -1853,10 +1857,12 @@ public class Queue extends ResourceController implements Saveable {
         /**
          * True if the task allows concurrent builds, where the same {@link Task} is executed
          * by multiple executors concurrently on the same or different nodes.
-         *
+         * @return by default, false
          * @since 1.338
          */
-        boolean isConcurrentBuild();
+        default boolean isConcurrentBuild() {
+            return false;
+        }
 
         /**
          * Obtains the {@link SubTask}s that constitute this task.
@@ -1869,13 +1875,12 @@ public class Queue extends ResourceController implements Saveable {
          * <p>
          * At least size 1.
          *
-         * <p>
-         * Since this is a newly added method, the invocation may results in {@link AbstractMethodError}.
-         * Use {@link Tasks#getSubTasksOf(Queue.Task)} that avoids this.
-         *
+         * @return by default, {@code this}
          * @since 1.377
          */
-        Collection<? extends SubTask> getSubTasks();
+        default Collection<? extends SubTask> getSubTasks() {
+            return Collections.singleton(this);
+        }
 
         /**
          * This method allows the task to provide the default fallback authentication object to be used
@@ -1885,16 +1890,14 @@ public class Queue extends ResourceController implements Saveable {
          * When the task execution touches other objects inside Jenkins, the access control is performed
          * based on whether this {@link Authentication} is allowed to use them.
          *
-         * <p>
-         * This method was added to an interface after it was created, so plugins built against
-         * older versions of Jenkins may not have this method implemented. Called private method _getDefaultAuthenticationOf(Task) on {@link Tasks}
-         * to avoid {@link AbstractMethodError}.
-         *
+         * @return by default, {@link ACL#SYSTEM}
          * @since 1.520
          * @see QueueItemAuthenticator
          * @see Tasks#getDefaultAuthenticationOf(Queue.Task)
          */
-        @Nonnull Authentication getDefaultAuthentication();
+        default @Nonnull Authentication getDefaultAuthentication() {
+            return ACL.SYSTEM;
+        }
 
         /**
          * This method allows the task to provide the default fallback authentication object to be used
@@ -1913,7 +1916,9 @@ public class Queue extends ResourceController implements Saveable {
          * @see QueueItemAuthenticator
          * @see Tasks#getDefaultAuthenticationOf(Queue.Task, Queue.Item)
          */
-        @Nonnull Authentication getDefaultAuthentication(Queue.Item item);
+        default @Nonnull Authentication getDefaultAuthentication(Queue.Item item) {
+            return getDefaultAuthentication();
+        }
     }
 
     /**
@@ -1945,13 +1950,12 @@ public class Queue extends ResourceController implements Saveable {
          * Estimate of how long will it take to execute this executable.
          * Measured in milliseconds.
          *
-         * Please, consider using {@link Executables#getEstimatedDurationFor(Queue.Executable)}
-         * to protected against AbstractMethodErrors!
-         *
-         * @return -1 if it's impossible to estimate.
+         * @return -1 if it's impossible to estimate; default, {@link SubTask#getEstimatedDuration}
          * @since 1.383
          */
-        long getEstimatedDuration();
+        default long getEstimatedDuration() {
+            return Executables.getParentOf(this).getEstimatedDuration();
+        }
 
         /**
          * Used to render the HTML. Should be a human readable text of what this executable is.
@@ -2210,7 +2214,7 @@ public class Queue extends ResourceController implements Saveable {
                 if (a!=null)
                     return a;
             }
-            return Tasks.getDefaultAuthenticationOf(task, this);
+            return task.getDefaultAuthentication(this);
         }
 
 
@@ -2562,7 +2566,7 @@ public class Queue extends ResourceController implements Saveable {
                 return elapsed > Math.max(d,60000L)*10;
             } else {
                 // more than a day in the queue
-                return TimeUnit2.MILLISECONDS.toHours(elapsed)>24;
+                return TimeUnit.MILLISECONDS.toHours(elapsed)>24;
             }
         }
 

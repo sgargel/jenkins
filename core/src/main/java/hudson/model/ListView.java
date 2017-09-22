@@ -45,9 +45,11 @@ import java.util.logging.Logger;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
+import javax.annotation.CheckForNull;
 import javax.annotation.concurrent.GuardedBy;
 import javax.servlet.ServletException;
 import jenkins.model.Jenkins;
+import jenkins.model.ParameterizedJobMixIn;
 
 import net.sf.json.JSONObject;
 import org.jenkinsci.Symbol;
@@ -183,7 +185,7 @@ public class ListView extends View implements DirectlyModifiableView {
             names = new TreeSet<String>(jobNames);
         }
 
-        ItemGroup<? extends TopLevelItem> parent = getOwnerItemGroup();
+        ItemGroup<? extends TopLevelItem> parent = getOwner().getItemGroup();
         List<TopLevelItem> parentItems = new ArrayList<TopLevelItem>(parent.getItems());
         includeItems(parent, parentItems, names);
 
@@ -195,10 +197,10 @@ public class ListView extends View implements DirectlyModifiableView {
             candidates = parent.getItems();
         }
         for (TopLevelItem item : candidates) {
-            if (!names.contains(item.getRelativeNameFrom(getOwnerItemGroup()))) continue;
+            if (!names.contains(item.getRelativeNameFrom(getOwner().getItemGroup()))) continue;
             // Add if no status filter or filter matches enabled/disabled status:
-            if(statusFilter == null || !(item instanceof AbstractProject)
-                              || ((AbstractProject)item).isDisabled() ^ statusFilter)
+            if(statusFilter == null || !(item instanceof ParameterizedJobMixIn.ParameterizedJob) // TODO or better to call the more generic Job.isBuildable?
+                              || ((ParameterizedJobMixIn.ParameterizedJob)item).isDisabled() ^ statusFilter)
                 items.add(item);
         }
 
@@ -250,7 +252,7 @@ public class ListView extends View implements DirectlyModifiableView {
     
     public synchronized boolean jobNamesContains(TopLevelItem item) {
         if (item == null) return false;
-        return jobNames.contains(item.getRelativeNameFrom(getOwnerItemGroup()));
+        return jobNames.contains(item.getRelativeNameFrom(getOwner().getItemGroup()));
     }
 
     /**
@@ -261,7 +263,7 @@ public class ListView extends View implements DirectlyModifiableView {
     @Override
     public void add(TopLevelItem item) throws IOException {
         synchronized (this) {
-            jobNames.add(item.getRelativeNameFrom(getOwnerItemGroup()));
+            jobNames.add(item.getRelativeNameFrom(getOwner().getItemGroup()));
         }
         save();
     }
@@ -274,7 +276,7 @@ public class ListView extends View implements DirectlyModifiableView {
     @Override
     public boolean remove(TopLevelItem item) throws IOException {
         synchronized (this) {
-            String name = item.getRelativeNameFrom(getOwnerItemGroup());
+            String name = item.getRelativeNameFrom(getOwner().getItemGroup());
             if (!jobNames.remove(name)) return false;
         }
         save();
@@ -334,13 +336,13 @@ public class ListView extends View implements DirectlyModifiableView {
     @Override
     @RequirePOST
     public Item doCreateItem(StaplerRequest req, StaplerResponse rsp) throws IOException, ServletException {
-        ItemGroup<? extends TopLevelItem> ig = getOwnerItemGroup();
+        ItemGroup<? extends TopLevelItem> ig = getOwner().getItemGroup();
         if (ig instanceof ModifiableItemGroup) {
             TopLevelItem item = ((ModifiableItemGroup<? extends TopLevelItem>)ig).doCreateItem(req, rsp);
             if (item!=null) {
                 if (needToAddToCurrentView(req)) {
                     synchronized (this) {
-                        jobNames.add(item.getRelativeNameFrom(getOwnerItemGroup()));
+                        jobNames.add(item.getRelativeNameFrom(getOwner().getItemGroup()));
                     }
                     owner.save();
                 }
@@ -377,16 +379,19 @@ public class ListView extends View implements DirectlyModifiableView {
             throw new Failure("Query parameter 'name' is required");
 
         TopLevelItem item = resolveName(name);
+        if (item==null)
+            throw new Failure("Query parameter 'name' does not correspond to a known and readable item");
+
         if (remove(item))
             owner.save();
 
         return HttpResponses.ok();
     }
 
-    private TopLevelItem resolveName(String name) {
-        TopLevelItem item = getOwnerItemGroup().getItem(name);
+    private @CheckForNull TopLevelItem resolveName(String name) {
+        TopLevelItem item = getOwner().getItemGroup().getItem(name);
         if (item == null) {
-            name = Items.getCanonicalName(getOwnerItemGroup(), name);
+            name = Items.getCanonicalName(getOwner().getItemGroup(), name);
             item = Jenkins.getInstance().getItemByFullName(name, TopLevelItem.class);
         }
         return item;
@@ -405,12 +410,12 @@ public class ListView extends View implements DirectlyModifiableView {
             jobNames.clear();
             Iterable<? extends TopLevelItem> items;
             if (recurse) {
-                items = Items.getAllItems(getOwnerItemGroup(), TopLevelItem.class);
+                items = Items.getAllItems(getOwner().getItemGroup(), TopLevelItem.class);
             } else {
-                items = getOwnerItemGroup().getItems();
+                items = getOwner().getItemGroup().getItems();
             }
             for (TopLevelItem item : items) {
-                String relativeNameFrom = item.getRelativeNameFrom(getOwnerItemGroup());
+                String relativeNameFrom = item.getRelativeNameFrom(getOwner().getItemGroup());
                 if(req.getParameter(relativeNameFrom)!=null) {
                     jobNames.add(relativeNameFrom);
                 }
